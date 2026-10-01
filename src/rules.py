@@ -102,7 +102,57 @@ def _close_incident(actor, entity, data, lookup):
         raise ConflictError("cannot close incident while tasks remain active")
     if [v for v in _all(lookup, "ventilation") if v["status"] != "running"]:
         raise ConflictError("cannot close incident until ventilation is restored")
+    if [r for r in _all(lookup, "offline_record") if r["status"] == "conflict"]:
+        raise ConflictError("cannot close incident while record conflicts are pending")
     return {"closed_by": actor.user_id}
+
+
+def _restore_ventilation(actor, entity, data, lookup):
+    result = str(data.get("test_result", "")).strip().lower()
+    if result != "pass":
+        raise ValidationError("ventilation restore requires a passing retest (test_result=pass)")
+    area = entity["data"].get("area_code")
+    lingering = [
+        w for w in _all(lookup, "worker")
+        if w["data"].get("location_code") == area and w["status"] in ("missing", "located")
+    ]
+    if lingering:
+        raise ConflictError("cannot restore ventilation while workers remain in the affected area")
+    return {"restored_by": actor.user_id, "restored_at": data.get("tested_at")}
+
+
+def _occupy_refuge(actor, entity, data, lookup):
+    capacity = _number(entity["data"].get("capacity"), "capacity")
+    occupancy = int(entity["data"].get("occupancy", 0) or 0)
+    if occupancy >= capacity:
+        raise ConflictError("refuge is over capacity and cannot be occupied")
+    occupant = str(data.get("occupant", "")).strip()
+    if not occupant:
+        raise ValidationError("occupant is required")
+    occupancy += 1
+    return {
+        "occupancy": occupancy,
+        "last_occupant": occupant,
+        "__next_status__": "occupied" if occupancy > 0 else "available",
+    }
+
+
+def _release_refuge(actor, entity, data, lookup):
+    occupancy = int(entity["data"].get("occupancy", 0) or 0)
+    if occupancy <= 0:
+        raise ValidationError("refuge is already empty")
+    occupancy -= 1
+    return {
+        "occupancy": occupancy,
+        "__next_status__": "occupied" if occupancy > 0 else "available",
+    }
+
+
+def _resolve_record_conflict(actor, entity, data, lookup):
+    decision = str(data.get("decision", "")).strip().lower()
+    if decision not in ("accept", "reject"):
+        raise ValidationError("decision must be accept or reject")
+    return {"decision": decision, "resolved_by": actor.user_id}
 
 
 class RuleEngine:
@@ -143,7 +193,7 @@ class RuleEngine:
             "clear": (("blocked", "restricted"), "open"),
         },
         "refuge": {
-            "occupy": (("available",), "occupied"),
+            "occupy": (("available", "occupied"), "occupied"),
             "release": (("occupied",), "available"),
             "maintain": (("available",), "maintenance"),
             "reopen": (("maintenance",), "available"),
@@ -162,6 +212,10 @@ class RuleEngine:
             "complete": (("in_progress",), "completed"),
             "cancel": (("proposed", "assigned", "in_progress"), "cancelled"),
         },
+        "offline_record": {
+            "confirm": (("merged",), "confirmed"),
+            "resolve_conflict": (("conflict",), "confirmed"),
+        },
     }
     CREATE_REQUIRED = {
         "worker": ("name", "location_code", "team"),
@@ -176,11 +230,13 @@ class RuleEngine:
     ACTION_REQUIRED = {
         ("worker", "rescue"): ("incident_id",),
         ("sensor", "mark_faulty"): ("reason",),
-        ("ventilation", "restore"): ("tested_at",),
+        ("ventilation", "restore"): ("tested_at", "test_result"),
         ("ventilation", "degrade"): ("reason",),
         ("incident", "close"): ("summary",),
         ("task", "complete"): ("result",),
         ("task", "cancel"): ("reason",),
+        ("refuge", "occupy"): ("occupant",),
+        ("offline_record", "resolve_conflict"): ("decision",),
     }
     CREATE_ROLES = {
         "worker": ("admin", "safety", "dispatcher"),
@@ -223,6 +279,8 @@ class RuleEngine:
         "accept": ("admin", "field", "dispatcher"),
         "complete": ("admin", "field", "dispatcher"),
         "cancel": ("admin", "dispatcher", "safety"),
+        ("offline_record", "confirm"): ("admin", "safety", "dispatcher"),
+        ("offline_record", "resolve_conflict"): ("admin", "safety"),
     }
     CUSTOM_CREATE = {
         "worker": lambda a, d, l: _validate_worker(d),
@@ -238,6 +296,10 @@ class RuleEngine:
         ("sensor", "raise_alarm"): _sensor_alarm,
         ("incident", "close"): _close_incident,
         ("task", "complete"): _complete_task,
+        ("ventilation", "restore"): _restore_ventilation,
+        ("refuge", "occupy"): _occupy_refuge,
+        ("refuge", "release"): _release_refuge,
+        ("offline_record", "resolve_conflict"): _resolve_record_conflict,
     }
 
     def normalize_kind(self, kind):
@@ -274,6 +336,8 @@ class RuleEngine:
         custom = self.CUSTOM_TRANSITIONS.get((kind, action))
         extra = custom(actor, entity, data, lookup) if custom else {}
         patch = dict(data)
-        if extra:
-            patch.update(extra)
+        override = extra.pop("__next_status__", None)
+        patch.update(extra)
+        if override:
+            next_status = override
         return next_status, patch

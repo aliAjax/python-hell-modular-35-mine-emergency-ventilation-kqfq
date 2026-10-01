@@ -54,6 +54,20 @@ class SQLiteRepository:
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(actor_id, idem_key)
                 );
+                CREATE TABLE IF NOT EXISTS record_revisions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entity_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(entity_id, revision)
+                );
+                CREATE INDEX IF NOT EXISTS idx_record_revisions_entity
+                    ON record_revisions(entity_id, revision);
             """)
 
     @staticmethod
@@ -197,6 +211,60 @@ class SQLiteRepository:
                 "INSERT OR REPLACE INTO idempotency(actor_id, idem_key, entity_id, created_at) "
                 "VALUES (?, ?, ?, ?)",
                 (actor_id, idem_key, entity_id, utcnow()),
+            )
+
+    @staticmethod
+    def _revision_from_row(row):
+        return {
+            "id": row["id"],
+            "entity_id": row["entity_id"],
+            "revision": int(row["revision"]),
+            "status": row["status"],
+            "content": json.loads(row["content"]),
+            "content_hash": row["content_hash"],
+            "source": row["source"],
+            "created_by": row["created_by"],
+            "created_at": row["created_at"],
+        }
+
+    def add_record_revision(self, entity_id, revision, status, content, content_hash, source, actor_id):
+        payload = json.dumps(content, ensure_ascii=False, sort_keys=True)
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO record_revisions(entity_id, revision, status, content, content_hash, source, created_by, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (entity_id, revision, status, payload, content_hash, source, actor_id, utcnow()),
+            )
+
+    def get_record_revision(self, entity_id, revision):
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM record_revisions WHERE entity_id = ? AND revision = ?",
+                (entity_id, revision),
+            ).fetchone()
+        return self._revision_from_row(row) if row else None
+
+    def latest_record_revision(self, entity_id):
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM record_revisions WHERE entity_id = ? ORDER BY revision DESC LIMIT 1",
+                (entity_id,),
+            ).fetchone()
+        return self._revision_from_row(row) if row else None
+
+    def list_record_revisions(self, entity_id):
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM record_revisions WHERE entity_id = ? ORDER BY revision",
+                (entity_id,),
+            ).fetchall()
+        return [self._revision_from_row(row) for row in rows]
+
+    def update_record_revision_status(self, entity_id, revision, status):
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE record_revisions SET status = ? WHERE entity_id = ? AND revision = ?",
+                (status, entity_id, revision),
             )
 
     def ping(self):
