@@ -37,13 +37,29 @@ curl http://127.0.0.1:8335/health
 
 身份通过`X-User-Id`和`X-Role`请求头传入，角色和动作权限由规则引擎校验。## 核心流程
 
-创建矿井事件、人员和设备记录后，依次执行撤离、搜救、通风恢复和事件关闭。`POST /api/offline-records` 用于合并现场离线记录，`source_id + record_id` 相同会幂等返回原记录。
+创建矿井事件、人员和设备记录后，依次执行撤离、搜救、通风恢复和事件关闭。`POST /api/offline-records` 用于合并现场离线记录（修订账），`source_id + record_id` 相同会幂等返回原记录，可带`?batch_id=...`做整批续传。
+
+## 修订账（离线记录）
+
+每条现场记录以`(source_id, record_id)`为稳定身份，修订按`recorded_at`管理：
+
+- **同一记录只认一次**：完全相同的修订重复补传返回`existing`，不产生新数据。
+- **新修订取代旧稿**：`recorded_at`更新的修订自动成为当前版本，旧稿标记为`superseded`；晚到的更旧草稿不再覆盖当前值，只记为`stale`（修复回网乱序时的"旧稿覆盖"）。
+- **待确认冲突**：同一时刻不同内容（`same_timestamp_divergent`）或与已确认内容不一致（`differs_from_confirmed`）时，记录进入`conflict`状态并列出`pending_conflicts`。
+- **已确认内容不可覆盖**：冲突必须通过`POST /api/entities/<id>/actions {"action":"confirm","data":{"rev_id":"..."}}`显式采纳，新修订在确认前不会改动已确认内容。
+- **整批续传**：携带同一`batch_id`重试时，已处理项返回`skipped`不再重复处理，只有`failed`项重新执行；修正后的失败项成功后自动勾销挂账。`GET /api/batches/<batch_id>`查看每项状态与`unfinished`列表。
+
+## 门禁规则
+
+- **通风恢复**：`restore`必须提供有效的复测通过（`tested_at`为ISO-8601且`test_result="pass"`），并且设备`area_code`影响区域内没有`active/missing/located`状态人员（即全部撤离、救出），否则拒绝恢复。
+- **避险硐室容量**：`occupy`（可带`count`，默认1）不得使`occupants`超过`capacity`；`release`支持部分释放，全部释放后回到`available`。
+- **事件关闭拦截**：关闭前若存在`missing/located`人员、活跃任务、未恢复运行的通风设备，或状态为`conflict`的离线记录，一律拒绝关闭。
 
 ## 规则重点
 
 - 活跃任务按 `dedupe_key` 防止重复派工。
 - 气体读数按阈值计算`severity`。
-- 事件关闭前必须没有失联或已定位人员、没有活跃任务，并且所有通风设备恢复运行。
+- 事件关闭前必须没有失联或已定位人员、没有活跃任务、没有待确认离线冲突，并且所有通风设备恢复运行。
 
 ## 测试
 

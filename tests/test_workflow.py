@@ -42,8 +42,8 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(sensor["status"], "alarm")
 
         vent = self.create("ventilation", {"name": "fan-1", "area_code": "M-01", "capacity": 100})
-        vent = self.act(vent, "stop", {})
-        vent = self.act(vent, "restore", {"tested_at": "2026-09-27T11:00:00Z"})
+        vent = self.act(vent, "stop", {"reason": "power outage"})
+        vent = self.act(vent, "restore", {"tested_at": "2026-09-27T11:00:00Z", "test_result": "pass"})
         self.assertEqual(vent["status"], "running")
 
         task = self.create("task", {"incident_id": incident["id"], "task_type": "rescue", "target": "worker-1", "dedupe_key": "rescue-1"})
@@ -59,8 +59,10 @@ class WorkflowTest(unittest.TestCase):
         record = {"source_id": "field-a", "record_id": "42", "recorded_at": "2026-09-27T10:00:00Z", "payload": {"type": "gas", "value": 12}}
         first = self.service.merge_offline(self.actor, [record])
         second = self.service.merge_offline(self.actor, [record])
-        self.assertEqual(first[0]["id"], second[0]["id"])
+        self.assertEqual(first["items"][0]["id"], second["items"][0]["id"])
         self.assertEqual(len(self.service.list("offline_record")), 1)
+        self.assertEqual(first["counts"]["created"], 1)
+        self.assertEqual(second["counts"]["existing"], 1)
 
 
 if __name__ == "__main__":

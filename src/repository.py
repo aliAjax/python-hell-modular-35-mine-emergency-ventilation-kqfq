@@ -54,6 +54,15 @@ class SQLiteRepository:
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(actor_id, idem_key)
                 );
+                CREATE TABLE IF NOT EXISTS batch_items (
+                    batch_id TEXT NOT NULL,
+                    item_key TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    entity_id TEXT,
+                    detail TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(batch_id, item_key)
+                );
             """)
 
     @staticmethod
@@ -197,6 +206,51 @@ class SQLiteRepository:
                 "INSERT OR REPLACE INTO idempotency(actor_id, idem_key, entity_id, created_at) "
                 "VALUES (?, ?, ?, ?)",
                 (actor_id, idem_key, entity_id, utcnow()),
+            )
+
+    def get_batch_item(self, batch_id, item_key):
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM batch_items WHERE batch_id = ? AND item_key = ?",
+                (batch_id, item_key),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "batch_id": row["batch_id"],
+            "item_key": row["item_key"],
+            "state": row["state"],
+            "entity_id": row["entity_id"],
+            "detail": json.loads(row["detail"]),
+            "updated_at": row["updated_at"],
+        }
+
+    def list_batch_items(self, batch_id):
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM batch_items WHERE batch_id = ? ORDER BY rowid", (batch_id,)
+            ).fetchall()
+        return [
+            {
+                "batch_id": row["batch_id"],
+                "item_key": row["item_key"],
+                "state": row["state"],
+                "entity_id": row["entity_id"],
+                "detail": json.loads(row["detail"]),
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
+
+    def save_batch_item(self, batch_id, item_key, state, entity_id, detail):
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO batch_items(batch_id, item_key, state, entity_id, detail, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(batch_id, item_key) DO UPDATE SET "
+                "state = excluded.state, entity_id = excluded.entity_id, "
+                "detail = excluded.detail, updated_at = excluded.updated_at",
+                (batch_id, item_key, state, entity_id, json.dumps(detail, ensure_ascii=False, sort_keys=True), utcnow()),
             )
 
     def ping(self):
